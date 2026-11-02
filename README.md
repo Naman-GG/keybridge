@@ -26,7 +26,7 @@ Then double-tap **Right ⌘**. Your typing, trackpad, clicks and scrolling now g
 
   | Gesture | On Windows |
   |---|---|
-  | Pinch | Zoom (Ctrl + scroll) |
+  | Pinch | Zoom in where you pinch, like Chrome's own pinch. To change the whole page's zoom instead, pick it under **Pinch on Windows** in the menu bar. |
   | 3 or 4 fingers up | Task View (Win+Tab) |
   | 3 or 4 fingers down | Show desktop (Win+D) |
   | 3 fingers left / right | Switch apps (Alt+Tab) |

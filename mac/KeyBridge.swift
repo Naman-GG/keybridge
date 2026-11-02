@@ -153,6 +153,10 @@ final class Link {
 
     func sendWheel(v: Int16, h: Int16) { send([0x07] + Link.be(v) + Link.be(h)) }
 
+    func sendPinch(_ phase: UInt8, scale: Double) {
+        send([0x08, phase] + Link.be(Int16(bitPattern: UInt16(min(max(scale, 0.05), 60) * 1000))))
+    }
+
     static func be(_ v: Int16) -> [UInt8] { [UInt8(truncatingIfNeeded: v >> 8), UInt8(truncatingIfNeeded: v)] }
 
     // Frame: u16 length | u64 counter | AES-GCM(msg); nonce = 0000 ‖ counter
@@ -278,6 +282,7 @@ final class App: NSObject, NSApplicationDelegate {
     var pinchRest = 0.0
     var pinchCtrl = false
     var pinchTimer: Timer?
+    var pinchScale: Double?
 
     var remote = false
     var sentDown = Set<UInt16>()
@@ -289,6 +294,10 @@ final class App: NSObject, NSApplicationDelegate {
     var layout: Layout {
         get { Layout(rawValue: defaults.string(forKey: "layout") ?? "") ?? .macStyle }
         set { defaults.set(newValue.rawValue, forKey: "layout"); rebuildMenu() }
+    }
+    var pageZoomPinch: Bool {
+        get { defaults.bool(forKey: "pageZoomPinch") }
+        set { endPinch(); defaults.set(newValue, forKey: "pageZoomPinch"); rebuildMenu() }
     }
     var pointerSpeed: Double {
         get { defaults.object(forKey: "pointerSpeed") as? Double ?? 1.5 }
@@ -443,17 +452,24 @@ final class App: NSObject, NSApplicationDelegate {
     func pinch(_ amount: Double, ended: Bool) {
         pinchTimer?.invalidate()
         if ended { endPinch(); return }
-        if !sentDown.contains(0x1D) { send(0x1D, down: true); pinchCtrl = true }
-        pinchRest += amount * 1200
-        let v = pinchRest.rounded(.towardZero)
-        pinchRest -= v
-        if v != 0 { link.sendWheel(v: Int16(clamping: Int(v)), h: 0) }
+        if pageZoomPinch {
+            if !sentDown.contains(0x1D) { send(0x1D, down: true); pinchCtrl = true }
+            pinchRest += amount * 1200
+            let v = pinchRest.rounded(.towardZero)
+            pinchRest -= v
+            if v != 0 { link.sendWheel(v: Int16(clamping: Int(v)), h: 0) }
+        } else {
+            if pinchScale == nil { pinchScale = 1; link.sendPinch(0, scale: 1) }
+            pinchScale = min(max(pinchScale! * (1 + amount), 0.05), 60)
+            link.sendPinch(1, scale: pinchScale!)
+        }
         pinchTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in self?.endPinch() }
     }
 
     func endPinch() {
         pinchTimer?.invalidate()
         if pinchCtrl { send(0x1D, down: false); pinchCtrl = false }
+        if let scale = pinchScale { link.sendPinch(2, scale: scale); pinchScale = nil }
         pinchRest = 0
     }
 
@@ -569,12 +585,26 @@ final class App: NSObject, NSApplicationDelegate {
         }
         speedItem.submenu = speedMenu
 
+        let pinchItem = menu.addItem(withTitle: "Pinch on Windows", action: nil, keyEquivalent: "")
+        let pinchMenu = NSMenu()
+        for (title, page) in [("Zoom in where you pinch (like Chrome)", false), ("Change page zoom (Ctrl + scroll)", true)] {
+            let item = pinchMenu.addItem(withTitle: title, action: #selector(pickPinch(_:)), keyEquivalent: "")
+            item.representedObject = page
+            item.state = page == pageZoomPinch ? .on : .off
+            item.target = self
+        }
+        pinchItem.submenu = pinchMenu
+
         menu.addItem(withTitle: "Set Windows address & pairing code…", action: #selector(askForAddress), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit KeyBridge", action: #selector(quit), keyEquivalent: "q")
         for item in menu.items where item.action != nil { item.target = self }
         for item in sub.items { item.target = self }
         statusItem.menu = menu
+    }
+
+    @objc func pickPinch(_ sender: NSMenuItem) {
+        if let page = sender.representedObject as? Bool { pageZoomPinch = page }
     }
 
     @objc func pickSpeed(_ sender: NSMenuItem) {
@@ -639,6 +669,7 @@ if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--selftest" {
             link.sendMove(dx: 25, dy: -7)
             link.sendButton(1, down: true); link.sendButton(1, down: false)
             link.sendWheel(v: -120, h: 40)
+            link.sendPinch(0, scale: 1); link.sendPinch(1, scale: 1.75); link.sendPinch(1, scale: 0.4); link.sendPinch(2, scale: 0.4)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { print("selftest: sent"); exit(0) }
         case .failed(let why): print("selftest: failed: \(why)"); exit(1)
         default: break

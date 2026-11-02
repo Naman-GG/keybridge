@@ -33,6 +33,7 @@ const (
 	msgMove       = 0x05
 	msgButton     = 0x06
 	msgWheel      = 0x07
+	msgPinch      = 0x08
 )
 
 func main() {
@@ -203,6 +204,18 @@ func serve(conn net.Conn, secret string) error {
 			if len(msg) >= 5 {
 				wheel(int16(binary.BigEndian.Uint16(msg[1:3])), int16(binary.BigEndian.Uint16(msg[3:5])))
 			}
+		case msgPinch:
+			if len(msg) < 4 {
+				continue
+			}
+			switch scale := float64(binary.BigEndian.Uint16(msg[2:4])) / 1000; msg[1] {
+			case 0:
+				pinchBegin()
+			case 1:
+				pinchUpdate(scale)
+			default:
+				pinchEnd()
+			}
 		case msgReleaseAll:
 			releaseAll(pressed, buttons)
 		case msgPing:
@@ -211,6 +224,7 @@ func serve(conn net.Conn, secret string) error {
 }
 
 func releaseAll(pressed map[uint16]bool, buttons map[uint8]bool) {
+	pinchEnd()
 	for scan := range pressed {
 		sendKey(scan, false)
 		delete(pressed, scan)
