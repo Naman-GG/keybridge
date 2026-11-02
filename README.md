@@ -7,12 +7,12 @@ Both computers must be on the same network (same Wi-Fi is fine).
 ## Setup
 
 ### 1. Windows laptop
-1. Copy `dist/KeyBridge.exe` to the laptop (AirDrop doesn't work with Windows, so use a USB stick, Google Drive, or email). Use `KeyBridge-32bit.exe` if the laptop runs 32-bit Windows.
+1. On the laptop, download `KeyBridge.exe` from the [latest release](https://github.com/Naman-GG/keybridge/releases/latest). Use `KeyBridge-32bit.exe` if the laptop runs 32-bit Windows.
 2. Double-click it. If SmartScreen warns you, click **More info → Run anyway**. If Windows Firewall asks, allow it on **Private networks**.
 3. The window shows an **Address** and a **Pairing code**. Leave the window open.
 
 ### 2. Mac
-1. Move `dist/KeyBridge.app` to `/Applications` and open it.
+1. Download `KeyBridge-mac.zip` from the [latest release](https://github.com/Naman-GG/keybridge/releases/latest), unzip it, and move KeyBridge.app to `/Applications`. The app isn't notarized, so the first time you open it, right-click it and choose **Open**. Or build it yourself with `./build.sh`.
 2. When macOS asks, allow KeyBridge in **System Settings → Privacy & Security → Accessibility**. You don't need to restart the app; it picks up the permission within a couple of seconds.
 3. Enter the address and pairing code from the Windows window.
 
