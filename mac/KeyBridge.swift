@@ -74,6 +74,8 @@ let buttonTypes: [CGEventType: (button: UInt8, down: Bool)] = [
 ]
 let pointerSpeeds: [Double] = [1, 1.5, 2, 3]
 let scrollScale = 3.0
+let gestureEvent: UInt32 = 29
+let dockGestureEvent: UInt32 = 30
 let capsLock: UInt16 = 0x39
 
 final class Link {
@@ -186,6 +188,83 @@ final class Link {
     }
 }
 
+enum Swipe { case up, down, left, right }
+
+final class SwipeRecognizer {
+    var onSwipe: ((Int, Swipe) -> Void)?
+    private var start: [Int32: CGPoint] = [:]
+    private var fingers = 0
+    private var fired = false
+
+    func frame(_ touches: [(id: Int32, pos: CGPoint)]) {
+        if touches.isEmpty { start = [:]; fingers = 0; fired = false; return }
+        if fired { return }
+        if touches.count < 3 { start = [:]; fingers = 0; return }
+        if touches.count != fingers {
+            fingers = touches.count
+            start = Dictionary(touches.map { ($0.id, $0.pos) }, uniquingKeysWith: { a, _ in a })
+            return
+        }
+        var dx = 0.0, dy = 0.0
+        for t in touches {
+            guard let p = start[t.id] else { return }
+            dx += (t.pos.x - p.x) / Double(touches.count)
+            dy += (t.pos.y - p.y) / Double(touches.count)
+        }
+        guard max(abs(dx), abs(dy)) > 0.12 else { return }
+        fired = true
+        let dir: Swipe = abs(dx) > abs(dy) ? (dx < 0 ? .left : .right) : (dy > 0 ? .up : .down)
+        let n = min(fingers, 4)
+        DispatchQueue.main.async { self.onSwipe?(n, dir) }
+    }
+}
+
+let swipes = SwipeRecognizer()
+
+// Raw finger positions from the private MultitouchSupport framework; each touch record is 96 bytes.
+final class Multitouch {
+    typealias Callback = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, Int32, Double, Int32) -> Int32
+    private var devices: [UnsafeMutableRawPointer] = []
+    private var startFn: (@convention(c) (UnsafeMutableRawPointer, Int32) -> Void)?
+    private var stopFn: (@convention(c) (UnsafeMutableRawPointer) -> Void)?
+
+    init() {
+        guard let h = dlopen("/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport", RTLD_NOW),
+              let list = dlsym(h, "MTDeviceCreateList"), let register = dlsym(h, "MTRegisterContactFrameCallback"),
+              let start = dlsym(h, "MTDeviceStart"), let stop = dlsym(h, "MTDeviceStop") else { return }
+        typealias ListFn = @convention(c) () -> Unmanaged<CFArray>
+        typealias RegisterFn = @convention(c) (UnsafeMutableRawPointer, Callback) -> Void
+        startFn = unsafeBitCast(start, to: (@convention(c) (UnsafeMutableRawPointer, Int32) -> Void).self)
+        stopFn = unsafeBitCast(stop, to: (@convention(c) (UnsafeMutableRawPointer) -> Void).self)
+        let array = unsafeBitCast(list, to: ListFn.self)().takeRetainedValue()
+        let callback: Callback = { _, data, count, _, _ in
+            var touches: [(id: Int32, pos: CGPoint)] = []
+            if let data {
+                for i in 0..<Int(count) {
+                    let f = data + i * 96
+                    let state = f.load(fromByteOffset: 20, as: Int32.self)
+                    guard state == 4 || state == 5 else { continue }
+                    touches.append((f.load(fromByteOffset: 16, as: Int32.self),
+                                    CGPoint(x: Double(f.load(fromByteOffset: 32, as: Float.self)),
+                                            y: Double(f.load(fromByteOffset: 36, as: Float.self)))))
+                }
+            }
+            swipes.frame(touches)
+            return 0
+        }
+        for i in 0..<CFArrayGetCount(array) {
+            guard let d = CFArrayGetValueAtIndex(array, i) else { continue }
+            let device = UnsafeMutableRawPointer(mutating: d)
+            unsafeBitCast(register, to: RegisterFn.self)(device, callback)
+            devices.append(device)
+        }
+    }
+
+    func setRunning(_ on: Bool) {
+        for d in devices { on ? startFn?(d, 0) : stopFn?(d) }
+    }
+}
+
 final class App: NSObject, NSApplicationDelegate {
     let link = Link()
     var statusItem: NSStatusItem!
@@ -195,6 +274,10 @@ final class App: NSObject, NSApplicationDelegate {
     var parkPoint = CGPoint.zero
     var moveRest = CGPoint.zero
     var scrollRest = CGPoint.zero
+    let multitouch = Multitouch()
+    var pinchRest = 0.0
+    var pinchCtrl = false
+    var pinchTimer: Timer?
 
     var remote = false
     var sentDown = Set<UInt16>()
@@ -222,6 +305,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
         rebuildMenu()
         installTap()
+        swipes.onSwipe = { [weak self] n, dir in self?.swipe(fingers: n, dir) }
 
         if let host = defaults.string(forKey: "host"), let secret = defaults.string(forKey: "secret") {
             link.connect(host: host, port: UInt16(defaults.integer(forKey: "port")).nonZero ?? 24830, secret: secret)
@@ -251,7 +335,7 @@ final class App: NSObject, NSApplicationDelegate {
         CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
-        let mouseMask = (moveTypes.union(buttonTypes.keys) + [.scrollWheel]).reduce(0) { $0 | (1 << $1.rawValue) }
+        let mouseMask = (moveTypes.union(buttonTypes.keys) + [.scrollWheel]).reduce(0) { $0 | (1 << $1.rawValue) } | (1 << gestureEvent) | (1 << dockGestureEvent)
         mouseTap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                      eventsOfInterest: CGEventMask(mouseMask), callback: callback,
                                      userInfo: Unmanaged.passUnretained(self).toOpaque())
@@ -268,7 +352,7 @@ final class App: NSObject, NSApplicationDelegate {
             if let mouseTap { CGEvent.tapEnable(tap: mouseTap, enable: remote) }
             return Unmanaged.passUnretained(event)
         }
-        if type == .scrollWheel || moveTypes.contains(type) || buttonTypes[type] != nil {
+        if type == .scrollWheel || moveTypes.contains(type) || buttonTypes[type] != nil || [gestureEvent, dockGestureEvent].contains(type.rawValue) {
             return handleMouse(type: type, event: event)
         }
         let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
@@ -325,6 +409,14 @@ final class App: NSObject, NSApplicationDelegate {
     func handleMouse(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         guard remote else { return Unmanaged.passUnretained(event) }
 
+        if type.rawValue == gestureEvent {
+            if let e = NSEvent(cgEvent: event), e.type == .magnify {
+                pinch(e.magnification, ended: !e.phase.isDisjoint(with: [.ended, .cancelled]))
+            }
+            return nil
+        }
+        if type.rawValue == dockGestureEvent { return nil }
+
         if moveTypes.contains(type) {
             moveRest.x += event.getDoubleValueField(.mouseEventDeltaX) * pointerSpeed
             moveRest.y += event.getDoubleValueField(.mouseEventDeltaY) * pointerSpeed
@@ -346,6 +438,43 @@ final class App: NSObject, NSApplicationDelegate {
             if v != 0 || h != 0 { link.sendWheel(v: Int16(clamping: Int(v)), h: Int16(clamping: Int(h))) }
         }
         return nil
+    }
+
+    func pinch(_ amount: Double, ended: Bool) {
+        pinchTimer?.invalidate()
+        if ended { endPinch(); return }
+        if !sentDown.contains(0x1D) { send(0x1D, down: true); pinchCtrl = true }
+        pinchRest += amount * 1200
+        let v = pinchRest.rounded(.towardZero)
+        pinchRest -= v
+        if v != 0 { link.sendWheel(v: Int16(clamping: Int(v)), h: 0) }
+        pinchTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in self?.endPinch() }
+    }
+
+    func endPinch() {
+        pinchTimer?.invalidate()
+        if pinchCtrl { send(0x1D, down: false); pinchCtrl = false }
+        pinchRest = 0
+    }
+
+    func swipe(fingers: Int, _ dir: Swipe) {
+        guard remote else { return }
+        let threeFingerDrag = UserDefaults(suiteName: "com.apple.AppleMultitouchTrackpad")?.bool(forKey: "TrackpadThreeFingerDrag") ?? false
+        if fingers == 3 && threeFingerDrag { return }
+        let win: UInt16 = 0xE05B, ctrl: UInt16 = 0x1D, alt: UInt16 = 0x38, shift: UInt16 = 0x2A
+        switch (fingers, dir) {
+        case (_, .up): press([win, 0x0F])
+        case (_, .down): press([win, 0x20])
+        case (3, .left): press([alt, 0x0F])
+        case (3, .right): press([alt, shift, 0x0F])
+        case (_, .left): press([ctrl, win, 0xE04D])
+        case (_, .right): press([ctrl, win, 0xE04B])
+        }
+    }
+
+    func press(_ combo: [UInt16]) {
+        for s in combo { link.sendKey(scan: s, down: true) }
+        for s in combo.reversed() where !sentDown.contains(s) { link.sendKey(scan: s, down: false) }
     }
 
     func pcScan(_ mod: ModKey) -> UInt16 {
@@ -377,6 +506,7 @@ final class App: NSObject, NSApplicationDelegate {
 
     func setRemote(_ on: Bool) {
         if !on {
+            endPinch()
             for scan in sentDown { link.sendKey(scan: scan, down: false) }
             sentDown.removeAll()
             link.sendReleaseAll()
@@ -390,6 +520,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
         CGAssociateMouseAndMouseCursorPosition(on ? 0 : 1)
         if let mouseTap { CGEvent.tapEnable(tap: mouseTap, enable: on) }
+        multitouch.setRunning(on)
         NSSound(named: on ? "Tink" : "Pop")?.play()
         rebuildMenu()
     }
