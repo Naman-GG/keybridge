@@ -65,6 +65,15 @@ let modifierKeys: [UInt16: ModKey] = [
     0x3C: ModKey(name: "shift", right: true, mask: 0x04),
 ]
 let rightCommand: UInt16 = 0x36
+
+let moveTypes: Set<CGEventType> = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+let buttonTypes: [CGEventType: (button: UInt8, down: Bool)] = [
+    .leftMouseDown: (0, true), .leftMouseUp: (0, false),
+    .rightMouseDown: (1, true), .rightMouseUp: (1, false),
+    .otherMouseDown: (2, true), .otherMouseUp: (2, false),
+]
+let pointerSpeeds: [Double] = [1, 1.5, 2, 3]
+let scrollScale = 3.0
 let capsLock: UInt16 = 0x39
 
 final class Link {
@@ -136,6 +145,14 @@ final class Link {
 
     func sendReleaseAll() { send([0x03]) }
 
+    func sendMove(dx: Int16, dy: Int16) { send([0x05] + Link.be(dx) + Link.be(dy)) }
+
+    func sendButton(_ b: UInt8, down: Bool) { send([0x06, b, down ? 1 : 0]) }
+
+    func sendWheel(v: Int16, h: Int16) { send([0x07] + Link.be(v) + Link.be(h)) }
+
+    static func be(_ v: Int16) -> [UInt8] { [UInt8(truncatingIfNeeded: v >> 8), UInt8(truncatingIfNeeded: v)] }
+
     // Frame: u16 length | u64 counter | AES-GCM(msg); nonce = 0000 ‖ counter
     private func send(_ msg: [UInt8]) {
         guard let conn, let key else { return }
@@ -173,7 +190,11 @@ final class App: NSObject, NSApplicationDelegate {
     let link = Link()
     var statusItem: NSStatusItem!
     var tap: CFMachPort?
+    var mouseTap: CFMachPort?
     var tapRetry: Timer?
+    var parkPoint = CGPoint.zero
+    var moveRest = CGPoint.zero
+    var scrollRest = CGPoint.zero
 
     var remote = false
     var sentDown = Set<UInt16>()
@@ -185,6 +206,10 @@ final class App: NSObject, NSApplicationDelegate {
     var layout: Layout {
         get { Layout(rawValue: defaults.string(forKey: "layout") ?? "") ?? .macStyle }
         set { defaults.set(newValue.rawValue, forKey: "layout"); rebuildMenu() }
+    }
+    var pointerSpeed: Double {
+        get { defaults.object(forKey: "pointerSpeed") as? Double ?? 1.5 }
+        set { defaults.set(newValue, forKey: "pointerSpeed"); rebuildMenu() }
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -223,16 +248,28 @@ final class App: NSObject, NSApplicationDelegate {
             return
         }
         tapRetry?.invalidate(); tapRetry = nil
-        let src = CFMachPortCreateRunLoopSource(nil, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+
+        let mouseMask = (moveTypes.union(buttonTypes.keys) + [.scrollWheel]).reduce(0) { $0 | (1 << $1.rawValue) }
+        mouseTap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                     eventsOfInterest: CGEventMask(mouseMask), callback: callback,
+                                     userInfo: Unmanaged.passUnretained(self).toOpaque())
+        if let mouseTap {
+            CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, mouseTap, 0), .commonModes)
+            CGEvent.tapEnable(tap: mouseTap, enable: remote)
+        }
         rebuildMenu()
     }
 
     func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            if let mouseTap { CGEvent.tapEnable(tap: mouseTap, enable: remote) }
             return Unmanaged.passUnretained(event)
+        }
+        if type == .scrollWheel || moveTypes.contains(type) || buttonTypes[type] != nil {
+            return handleMouse(type: type, event: event)
         }
         let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
 
@@ -285,6 +322,32 @@ final class App: NSObject, NSApplicationDelegate {
         send(pcScan(mod), down: down)
     }
 
+    func handleMouse(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        guard remote else { return Unmanaged.passUnretained(event) }
+
+        if moveTypes.contains(type) {
+            moveRest.x += event.getDoubleValueField(.mouseEventDeltaX) * pointerSpeed
+            moveRest.y += event.getDoubleValueField(.mouseEventDeltaY) * pointerSpeed
+            let dx = moveRest.x.rounded(.towardZero), dy = moveRest.y.rounded(.towardZero)
+            moveRest.x -= dx; moveRest.y -= dy
+            if dx != 0 || dy != 0 { link.sendMove(dx: Int16(clamping: Int(dx)), dy: Int16(clamping: Int(dy))) }
+            if abs(event.location.x - parkPoint.x) > 1 || abs(event.location.y - parkPoint.y) > 1 {
+                CGWarpMouseCursorPosition(parkPoint)
+            }
+        } else if let (button, down) = buttonTypes[type] {
+            if type != .otherMouseDown && type != .otherMouseUp || event.getIntegerValueField(.mouseEventButtonNumber) == 2 {
+                link.sendButton(button, down: down)
+            }
+        } else {
+            scrollRest.y += event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1) * scrollScale
+            scrollRest.x -= event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2) * scrollScale
+            let v = scrollRest.y.rounded(.towardZero), h = scrollRest.x.rounded(.towardZero)
+            scrollRest.y -= v; scrollRest.x -= h
+            if v != 0 || h != 0 { link.sendWheel(v: Int16(clamping: Int(v)), h: Int16(clamping: Int(h))) }
+        }
+        return nil
+    }
+
     func pcScan(_ mod: ModKey) -> UInt16 {
         if mod.name == "shift" { return mod.right ? 0x36 : 0x2A }
         let pc = layout.map(mod.name)
@@ -320,6 +383,13 @@ final class App: NSObject, NSApplicationDelegate {
         }
         pendingRightCmd = false
         remote = on
+        if on {
+            parkPoint = CGEvent(source: nil)?.location ?? .zero
+            moveRest = .zero; scrollRest = .zero
+            CGEventSource(stateID: .combinedSessionState)?.localEventsSuppressionInterval = 0
+        }
+        CGAssociateMouseAndMouseCursorPosition(on ? 0 : 1)
+        if let mouseTap { CGEvent.tapEnable(tap: mouseTap, enable: on) }
         NSSound(named: on ? "Tink" : "Pop")?.play()
         rebuildMenu()
     }
@@ -343,7 +413,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
         menu.addItem(.separator())
 
-        let t = menu.addItem(withTitle: remote ? "Type on Mac" : "Type on Windows", action: #selector(toggle), keyEquivalent: "")
+        let t = menu.addItem(withTitle: remote ? "Switch back to Mac" : "Switch to Windows", action: #selector(toggle), keyEquivalent: "")
         t.isEnabled = remote || link.isConnected
         let hint = menu.addItem(withTitle: "Shortcut: double-tap Right ⌘", action: nil, keyEquivalent: "")
         hint.isEnabled = false
@@ -358,12 +428,26 @@ final class App: NSObject, NSApplicationDelegate {
         }
         layoutItem.submenu = sub
 
+        let speedItem = menu.addItem(withTitle: "Pointer speed on Windows", action: nil, keyEquivalent: "")
+        let speedMenu = NSMenu()
+        for v in pointerSpeeds {
+            let item = speedMenu.addItem(withTitle: v.formatted() + "×", action: #selector(pickSpeed(_:)), keyEquivalent: "")
+            item.representedObject = v
+            item.state = v == pointerSpeed ? .on : .off
+            item.target = self
+        }
+        speedItem.submenu = speedMenu
+
         menu.addItem(withTitle: "Set Windows address & pairing code…", action: #selector(askForAddress), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit KeyBridge", action: #selector(quit), keyEquivalent: "q")
         for item in menu.items where item.action != nil { item.target = self }
         for item in sub.items { item.target = self }
         statusItem.menu = menu
+    }
+
+    @objc func pickSpeed(_ sender: NSMenuItem) {
+        if let v = sender.representedObject as? Double { pointerSpeed = v }
     }
 
     @objc func pickLayout(_ sender: NSMenuItem) {
@@ -421,6 +505,9 @@ if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--selftest" {
         switch st {
         case .connected:
             for scan: UInt16 in [0x23, 0x17] { link.sendKey(scan: scan, down: true); link.sendKey(scan: scan, down: false) }
+            link.sendMove(dx: 25, dy: -7)
+            link.sendButton(1, down: true); link.sendButton(1, down: false)
+            link.sendWheel(v: -120, h: 40)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { print("selftest: sent"); exit(0) }
         case .failed(let why): print("selftest: failed: \(why)"); exit(1)
         default: break

@@ -1,6 +1,6 @@
 # KeyBridge
 
-Use your Mac's built-in keyboard to type on a Windows laptop. **Double-tap Right ⌘** to switch where your typing goes. The menu bar shows `⌨︎ Mac` or an orange `⌨︎ → Windows`.
+Use your Mac's keyboard and trackpad to control a Windows laptop. **Double-tap Right ⌘** to switch between the two computers. The menu bar shows `⌨︎ Mac` or an orange `⌨︎ → Windows`.
 
 Both computers must be on the same network (same Wi-Fi is fine).
 
@@ -16,13 +16,14 @@ Both computers must be on the same network (same Wi-Fi is fine).
 2. When macOS asks, allow KeyBridge in **System Settings → Privacy & Security → Accessibility**. You don't need to restart the app; it picks up the permission within a couple of seconds.
 3. Enter the address and pairing code from the Windows window.
 
-Then double-tap **Right ⌘** and type. Double-tap it again to go back to the Mac.
+Then double-tap **Right ⌘**. Your typing, trackpad, clicks and scrolling now go to Windows. Double-tap it again to go back to the Mac.
 
 ## Good to know
 
 - **Modifier keys:** by default ⌘ becomes Ctrl, so ⌘C, ⌘V and ⌘T work as you'd expect. ⌥ becomes Alt and ⌃ becomes the Windows key. You can switch to a layout that follows PC key positions from the menu bar.
+- **Trackpad:** click and two-finger click work as left and right click, and two-finger scrolling works too. If the Windows pointer feels too slow or too fast, change **Pointer speed on Windows** in the menu bar. While you're controlling Windows, the Mac pointer stays still where you left it.
 - **Function keys:** hold `fn` to send F1–F12. fn+arrows sends Home/End/Page Up/Page Down, and fn+Delete sends Delete.
-- **Safety:** if the connection drops, typing switches back to the Mac by itself, and Windows releases any keys that were held down. Keystrokes are encrypted with AES-GCM using a key derived from the pairing code. Without the code, nobody else on the network can read your keystrokes or type into the laptop.
+- **Safety:** if the connection drops, control switches back to the Mac by itself, and Windows releases any keys or mouse buttons that were held down. Everything you send is encrypted with AES-GCM using a key derived from the pairing code. Without the code, nobody else on the network can see what you send or control the laptop.
 - **New pairing code:** run `KeyBridge.exe -reset` from a terminal.
 - **Start with Windows:** press Win+R, type `shell:startup`, and put a shortcut to KeyBridge.exe in that folder.
 - **Start with your Mac:** add KeyBridge in System Settings → General → Login Items.
@@ -30,7 +31,7 @@ Then double-tap **Right ⌘** and type. Double-tap it again to go back to the Ma
 ## Limitations
 - Windows doesn't let normal apps type into admin windows, UAC prompts or the Ctrl+Alt+Del screen. To type into admin apps, right-click KeyBridge.exe and choose **Run as administrator**.
 - While a Mac password field has focus, macOS blocks the keyboard from KeyBridge. That's a macOS security feature.
-- Media keys (brightness, volume) always act on the Mac.
+- Media keys (brightness, volume) and trackpad gestures like pinch and swipe always act on the Mac.
 - If you rebuild the app, macOS may ask for Accessibility permission again. If it doesn't work after a rebuild, remove KeyBridge from the Accessibility list and add it back.
 
 ## Building

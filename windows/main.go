@@ -30,6 +30,9 @@ const (
 	msgKey        = 0x02
 	msgReleaseAll = 0x03
 	msgPing       = 0x04
+	msgMove       = 0x05
+	msgButton     = 0x06
+	msgWheel      = 0x07
 )
 
 func main() {
@@ -104,10 +107,11 @@ func serve(conn net.Conn, secret string) error {
 	var lastCounter uint64
 	authed := false
 	pressed := map[uint16]bool{}
+	buttons := map[uint8]bool{}
 
 	defer func() {
 		if authed {
-			releaseAll(pressed)
+			releaseAll(pressed, buttons)
 			currentMu.Lock()
 			if current == conn {
 				current = nil
@@ -157,7 +161,7 @@ func serve(conn net.Conn, secret string) error {
 			current = conn
 			currentMu.Unlock()
 			authed = true
-			log.Printf("%s connected — Mac keyboard is linked", conn.RemoteAddr())
+			log.Printf("%s connected — Mac keyboard and trackpad are linked", conn.RemoteAddr())
 			continue
 		}
 
@@ -177,17 +181,43 @@ func serve(conn net.Conn, secret string) error {
 				delete(pressed, scan)
 			}
 			sendKey(scan, down)
+		case msgMove:
+			if len(msg) >= 5 {
+				moveMouse(int32(int16(binary.BigEndian.Uint16(msg[1:3]))), int32(int16(binary.BigEndian.Uint16(msg[3:5]))))
+			}
+		case msgButton:
+			if len(msg) < 3 {
+				continue
+			}
+			b, down := msg[1], msg[2] == 1
+			if !down && !buttons[b] {
+				continue
+			}
+			if down {
+				buttons[b] = true
+			} else {
+				delete(buttons, b)
+			}
+			mouseButton(b, down)
+		case msgWheel:
+			if len(msg) >= 5 {
+				wheel(int16(binary.BigEndian.Uint16(msg[1:3])), int16(binary.BigEndian.Uint16(msg[3:5])))
+			}
 		case msgReleaseAll:
-			releaseAll(pressed)
+			releaseAll(pressed, buttons)
 		case msgPing:
 		}
 	}
 }
 
-func releaseAll(pressed map[uint16]bool) {
+func releaseAll(pressed map[uint16]bool, buttons map[uint8]bool) {
 	for scan := range pressed {
 		sendKey(scan, false)
 		delete(pressed, scan)
+	}
+	for b := range buttons {
+		mouseButton(b, false)
+		delete(buttons, b)
 	}
 }
 
