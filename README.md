@@ -40,6 +40,12 @@ Then double-tap **Right ⌘**. Your typing, trackpad, clicks and scrolling now g
 - **Start with Windows:** press Win+R, type `shell:startup`, and put a shortcut to KeyBridge.exe in that folder.
 - **Start with your Mac:** add KeyBridge in System Settings → General → Login Items.
 
+## If the cursor feels laggy
+KeyBridge can only be as smooth as the network between the two computers. On a good connection, the delay is a few milliseconds.
+1. **Use a cable.** Connect the two computers with an Ethernet cable directly (USB adapters work), or plug both into the router.
+2. **Turn off Wi-Fi power saving on Windows.** In Device Manager, open your Wi-Fi adapter. Under **Power Management**, untick "Allow the computer to turn off this device". Under **Advanced**, turn off any power-saving option.
+3. **Use 5 GHz Wi-Fi** if your router offers it.
+
 ## Limitations
 - Windows doesn't let normal apps type into admin windows, UAC prompts or the Ctrl+Alt+Del screen. To type into admin apps, right-click KeyBridge.exe and choose **Run as administrator**.
 - While a Mac password field has focus, macOS blocks the keyboard from KeyBridge. That's a macOS security feature.
