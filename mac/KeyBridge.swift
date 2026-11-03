@@ -226,40 +226,73 @@ final class SwipeRecognizer {
 let swipes = SwipeRecognizer()
 
 // Raw finger positions from the private MultitouchSupport framework; each touch record is 96 bytes.
-// Devices are started once and never stopped: stopping right after starting crashes inside the framework.
+// Only runs while controlling Windows: an open trackpad client keeps the Mac from sleeping when the lid closes.
 final class Multitouch {
     typealias Callback = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, Int32, Double, Int32) -> Int32
-    private var deviceList: CFArray?
+    typealias DeviceFn = @convention(c) (UnsafeMutableRawPointer) -> Void
+    typealias RegisterFn = @convention(c) (UnsafeMutableRawPointer, Callback) -> Void
+
+    private var createList: (@convention(c) () -> Unmanaged<CFArray>)?
+    private var register: RegisterFn?, unregister: RegisterFn?
+    private var start: (@convention(c) (UnsafeMutableRawPointer, Int32) -> Void)?
+    private var stop: DeviceFn?
+    private var list: CFArray?
+    private var startedAt: TimeInterval = 0
+    private var generation = 0
+
+    private let callback: Callback = { _, data, count, _, _ in
+        var touches: [(id: Int32, pos: CGPoint)] = []
+        if let data {
+            for i in 0..<Int(count) {
+                let f = data + i * 96
+                let state = f.load(fromByteOffset: 20, as: Int32.self)
+                guard state == 4 || state == 5 else { continue }
+                touches.append((f.load(fromByteOffset: 16, as: Int32.self),
+                                CGPoint(x: Double(f.load(fromByteOffset: 32, as: Float.self)),
+                                        y: Double(f.load(fromByteOffset: 36, as: Float.self)))))
+            }
+        }
+        swipes.frame(touches)
+        return 0
+    }
 
     init() {
         guard let h = dlopen("/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport", RTLD_NOW),
-              let list = dlsym(h, "MTDeviceCreateList"), let register = dlsym(h, "MTRegisterContactFrameCallback"),
-              let start = dlsym(h, "MTDeviceStart") else { return }
-        typealias ListFn = @convention(c) () -> Unmanaged<CFArray>
-        typealias RegisterFn = @convention(c) (UnsafeMutableRawPointer, Callback) -> Void
-        typealias StartFn = @convention(c) (UnsafeMutableRawPointer, Int32) -> Void
-        let array = unsafeBitCast(list, to: ListFn.self)().takeRetainedValue()
-        deviceList = array
-        let callback: Callback = { _, data, count, _, _ in
-            var touches: [(id: Int32, pos: CGPoint)] = []
-            if let data {
-                for i in 0..<Int(count) {
-                    let f = data + i * 96
-                    let state = f.load(fromByteOffset: 20, as: Int32.self)
-                    guard state == 4 || state == 5 else { continue }
-                    touches.append((f.load(fromByteOffset: 16, as: Int32.self),
-                                    CGPoint(x: Double(f.load(fromByteOffset: 32, as: Float.self)),
-                                            y: Double(f.load(fromByteOffset: 36, as: Float.self)))))
-                }
+              let l = dlsym(h, "MTDeviceCreateList"), let r = dlsym(h, "MTRegisterContactFrameCallback"),
+              let u = dlsym(h, "MTUnregisterContactFrameCallback"), let st = dlsym(h, "MTDeviceStart"),
+              let sp = dlsym(h, "MTDeviceStop") else { return }
+        createList = unsafeBitCast(l, to: (@convention(c) () -> Unmanaged<CFArray>).self)
+        register = unsafeBitCast(r, to: RegisterFn.self)
+        unregister = unsafeBitCast(u, to: RegisterFn.self)
+        start = unsafeBitCast(st, to: (@convention(c) (UnsafeMutableRawPointer, Int32) -> Void).self)
+        stop = unsafeBitCast(sp, to: DeviceFn.self)
+    }
+
+    private func devices(_ list: CFArray) -> [UnsafeMutableRawPointer] {
+        (0..<CFArrayGetCount(list)).compactMap { CFArrayGetValueAtIndex(list, $0).map { UnsafeMutableRawPointer(mutating: $0) } }
+    }
+
+    // Stopping a device before it has finished starting crashes inside the framework, so stops wait
+    // at least 0.5s after a start, and the device list outlives the stop while the framework winds down.
+    func setRunning(_ on: Bool) {
+        generation += 1
+        let gen = generation
+        if on {
+            guard list == nil, let createList, let register, let start else { return }
+            let l = createList().takeRetainedValue()
+            for d in devices(l) { register(d, callback); start(d, 0) }
+            list = l
+            startedAt = ProcessInfo.processInfo.systemUptime
+        } else {
+            guard list != nil else { return }
+            let wait = max(0, startedAt + 0.5 - ProcessInfo.processInfo.systemUptime)
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+                guard let self, self.generation == gen, let l = self.list else { return }
+                for d in self.devices(l) { self.unregister?(d, self.callback); self.stop?(d) }
+                self.list = nil
+                swipes.frame([])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { withExtendedLifetime(l) {} }
             }
-            swipes.frame(touches)
-            return 0
-        }
-        for i in 0..<CFArrayGetCount(array) {
-            guard let d = CFArrayGetValueAtIndex(array, i) else { continue }
-            let device = UnsafeMutableRawPointer(mutating: d)
-            unsafeBitCast(register, to: RegisterFn.self)(device, callback)
-            unsafeBitCast(start, to: StartFn.self)(device, 0)
         }
     }
 }
@@ -554,6 +587,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
         CGAssociateMouseAndMouseCursorPosition(on ? 0 : 1)
         if let mouseTap { CGEvent.tapEnable(tap: mouseTap, enable: on) }
+        multitouch.setRunning(on)
         NSSound(named: on ? "Tink" : "Pop")?.play()
         rebuildMenu()
     }
@@ -679,6 +713,7 @@ extension UInt16 { var nonZero: UInt16? { self == 0 ? nil : self } }
 if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--selftest" {
     let a = CommandLine.arguments
     let multitouch = Multitouch()
+    multitouch.setRunning(true)
     let link = Link()
     link.onStateChange = { st in
         switch st {
@@ -688,13 +723,16 @@ if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--selftest" {
             link.sendButton(1, down: true); link.sendButton(1, down: false)
             link.sendWheel(v: -120, h: 40)
             link.sendPinch(0, scale: 1); link.sendPinch(1, scale: 1.75); link.sendPinch(1, scale: 0.4); link.sendPinch(2, scale: 0.4)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { print("selftest: sent"); exit(0) }
+            for (t, on) in [(0.6, false), (0.65, true), (0.7, false), (1.5, true), (1.6, false)] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + t) { multitouch.setRunning(on) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { print("selftest: sent"); exit(0) }
         case .failed(let why): print("selftest: failed: \(why)"); exit(1)
         default: break
         }
     }
     link.connect(host: a[2], port: UInt16(a[3]) ?? 24830, secret: a[4])
-    dispatchMain()
+    RunLoop.main.run()
 }
 
 let app = NSApplication.shared
