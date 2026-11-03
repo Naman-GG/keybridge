@@ -280,6 +280,7 @@ final class App: NSObject, NSApplicationDelegate {
     var pinchScale: Double?
 
     var remote = false
+    var screenLocked = false
     var sentDown = Set<UInt16>()
     var pendingRightCmd = false
     var lastRightCmdTap: TimeInterval = 0
@@ -310,6 +311,7 @@ final class App: NSObject, NSApplicationDelegate {
         rebuildMenu()
         installTap()
         swipes.onSwipe = { [weak self] n, dir in self?.swipe(fingers: n, dir) }
+        watchForLockAndSleep()
 
         if let host = defaults.string(forKey: "host"), let secret = defaults.string(forKey: "secret") {
             link.connect(host: host, port: UInt16(defaults.integer(forKey: "port")).nonZero ?? 24830, secret: secret)
@@ -507,8 +509,29 @@ final class App: NSObject, NSApplicationDelegate {
         link.sendKey(scan: scan, down: down)
     }
 
+    // While locked or asleep the Mac must get every click and key, or unlocking stalls waiting for input.
+    func watchForLockAndSleep() {
+        let backToMac: (Notification) -> Void = { [weak self] _ in
+            guard let self, self.remote else { return }
+            self.setRemote(false)
+        }
+        let distributed = DistributedNotificationCenter.default()
+        distributed.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] n in
+            self?.screenLocked = true
+            backToMac(n)
+        }
+        distributed.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            self?.screenLocked = false
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
+                     NSWorkspace.sessionDidResignActiveNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main, using: backToMac)
+        }
+    }
+
     @objc func toggle() {
-        if !remote && !link.isConnected {
+        if !remote && (!link.isConnected || screenLocked) {
             NSSound.beep()
             return
         }
