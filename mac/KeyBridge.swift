@@ -2,7 +2,6 @@
 import AppKit
 import CryptoKit
 import Network
-import os
 
 let scanCodes: [UInt16: UInt16] = [
     0x00: 0x1E, 0x01: 0x1F, 0x02: 0x20, 0x03: 0x21, 0x04: 0x23, 0x05: 0x22,
@@ -298,33 +297,6 @@ final class Multitouch {
     }
 }
 
-// Event taps run here, not on the main thread, so macOS never waits on a busy main thread to deliver input.
-final class EventThread: Thread {
-    private var runLoop: CFRunLoop?
-    private let ready = DispatchSemaphore(value: 0)
-
-    override func main() {
-        runLoop = CFRunLoopGetCurrent()
-        let keepAlive = CFRunLoopTimerCreateWithHandler(nil, .greatestFiniteMagnitude, 0, 0, 0) { _ in }
-        CFRunLoopAddTimer(runLoop, keepAlive, .commonModes)
-        ready.signal()
-        CFRunLoopRun()
-    }
-
-    func startAndWait() {
-        qualityOfService = .userInteractive
-        start()
-        ready.wait()
-    }
-
-    func add(_ port: CFMachPort) {
-        CFRunLoopAddSource(runLoop, CFMachPortCreateRunLoopSource(nil, port, 0), .commonModes)
-        CFRunLoopWakeUp(runLoop)
-    }
-}
-
-let log = Logger(subsystem: "local.keybridge", category: "events")
-
 final class App: NSObject, NSApplicationDelegate {
     let link = Link()
     var statusItem: NSStatusItem!
@@ -341,8 +313,6 @@ final class App: NSObject, NSApplicationDelegate {
     var pinchScale: Double?
 
     var remote = false
-    let swallowing = OSAllocatedUnfairLock(initialState: false)
-    let eventThread = EventThread()
     var screenLocked = false
     var sentDown = Set<UInt16>()
     var pendingRightCmd = false
@@ -372,8 +342,6 @@ final class App: NSObject, NSApplicationDelegate {
             self.rebuildMenu()
         }
         rebuildMenu()
-        startStallWatchdog()
-        eventThread.startAndWait()
         installTap()
         swipes.onSwipe = { [weak self] n, dir in self?.swipe(fingers: n, dir) }
         watchForLockAndSleep()
@@ -389,7 +357,7 @@ final class App: NSObject, NSApplicationDelegate {
         let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
         let callback: CGEventTapCallBack = { _, type, event, refcon in
             let app = Unmanaged<App>.fromOpaque(refcon!).takeUnretainedValue()
-            return app.filter(type: type, event: event)
+            return app.handle(type: type, event: event)
         }
         tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                 eventsOfInterest: CGEventMask(mask), callback: callback,
@@ -403,7 +371,7 @@ final class App: NSObject, NSApplicationDelegate {
             return
         }
         tapRetry?.invalidate(); tapRetry = nil
-        eventThread.add(tap)
+        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
         let mouseMask = (moveTypes.union(buttonTypes.keys) + [.scrollWheel]).reduce(0) { $0 | (1 << $1.rawValue) } | (1 << gestureEvent) | (1 << dockGestureEvent)
@@ -411,46 +379,18 @@ final class App: NSObject, NSApplicationDelegate {
                                      eventsOfInterest: CGEventMask(mouseMask), callback: callback,
                                      userInfo: Unmanaged.passUnretained(self).toOpaque())
         if let mouseTap {
-            eventThread.add(mouseTap)
+            CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, mouseTap, 0), .commonModes)
             CGEvent.tapEnable(tap: mouseTap, enable: remote)
         }
         rebuildMenu()
     }
 
-    // Runs on the event thread: decide pass/swallow at once, do the real work on the main thread.
-    func filter(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        let swallow = swallowing.withLock { $0 }
+    func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            log.error("event tap disabled by \(type == .tapDisabledByTimeout ? "timeout" : "user input", privacy: .public), re-enabling")
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            if let mouseTap { CGEvent.tapEnable(tap: mouseTap, enable: swallow) }
+            if let mouseTap { CGEvent.tapEnable(tap: mouseTap, enable: remote) }
             return Unmanaged.passUnretained(event)
         }
-        if let copy = event.copy() {
-            DispatchQueue.main.async {
-                if self.remote == swallow || type == .flagsChanged { _ = self.handle(type: type, event: copy) }
-            }
-        }
-        return swallow && type != .flagsChanged ? nil : Unmanaged.passUnretained(event)
-    }
-
-    func startStallWatchdog() {
-        let lastBeat = OSAllocatedUnfairLock(initialState: ProcessInfo.processInfo.systemUptime)
-        Thread.detachNewThread {
-            var worst = 0.0
-            while true {
-                Thread.sleep(forTimeInterval: 0.25)
-                DispatchQueue.main.async { lastBeat.withLock { $0 = ProcessInfo.processInfo.systemUptime } }
-                let stall = ProcessInfo.processInfo.systemUptime - lastBeat.withLock { $0 }
-                if stall > 1 { worst = max(worst, stall) } else if worst > 0 {
-                    log.error("main thread was stalled for \(worst, format: .fixed(precision: 1))s")
-                    worst = 0
-                }
-            }
-        }
-    }
-
-    func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .scrollWheel || moveTypes.contains(type) || buttonTypes[type] != nil || [gestureEvent, dockGestureEvent].contains(type.rawValue) {
             return handleMouse(type: type, event: event)
         }
@@ -640,7 +580,6 @@ final class App: NSObject, NSApplicationDelegate {
         }
         pendingRightCmd = false
         remote = on
-        swallowing.withLock { $0 = on }
         if on {
             parkPoint = CGEvent(source: nil)?.location ?? .zero
             moveRest = .zero; scrollRest = .zero
