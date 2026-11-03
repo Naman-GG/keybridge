@@ -35,6 +35,7 @@ Then double-tap **Right ⌘**. Your typing, trackpad, clicks and scrolling now g
   If you've turned on three-finger drag on your Mac, three-finger swipes are left alone so dragging still works. Use four fingers for the others.
 - **Function keys:** hold `fn` to send F1–F12. fn+arrows sends Home/End/Page Up/Page Down, and fn+Delete sends Delete.
 - **Safety:** if the connection drops, control switches back to the Mac by itself, and Windows releases any keys or mouse buttons that were held down. Everything you send is encrypted with AES-GCM using a key derived from the pairing code. Without the code, nobody else on the network can see what you send or control the laptop.
+- **Sleep and battery:** KeyBridge doesn't keep your Mac awake. It switches back to the Mac when the screen locks or the Mac sleeps, and only reads the trackpad while you're controlling Windows. If Windows is off, it tries to reconnect less and less often, at most every 30 seconds, and tries again right away when the Mac wakes.
 - **New pairing code:** run `KeyBridge.exe -reset` from a terminal.
 - **Start with Windows:** press Win+R, type `shell:startup`, and put a shortcut to KeyBridge.exe in that folder.
 - **Start with your Mac:** add KeyBridge in System Settings → General → Login Items.

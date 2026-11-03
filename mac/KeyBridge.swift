@@ -89,11 +89,19 @@ final class Link {
     private var counter: UInt64 = 0
     private var host = "", port: UInt16 = 24830, secret = ""
     private var retry: Timer?, ping: Timer?
+    private var retryDelay: TimeInterval = 3
 
     var isConnected: Bool { if case .connected = state { return true } else { return false } }
 
     func connect(host: String, port: UInt16, secret: String) {
         self.host = host; self.port = port; self.secret = secret
+        retryDelay = 3
+        reconnect()
+    }
+
+    func retryNow() {
+        guard case .failed = state else { return }
+        retryDelay = 3
         reconnect()
     }
 
@@ -128,6 +136,7 @@ final class Link {
                 salt: data.suffix(16), info: Data("keybridge v1".utf8), outputByteCount: 32)
             self.counter = 0
             self.send([0x01])
+            self.retryDelay = 3
             self.state = .connected
             self.ping = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.send([0x04]) }
             self.watchForClose(c)
@@ -179,7 +188,8 @@ final class Link {
     private func fail(_ why: String) {
         teardown()
         state = .failed(why)
-        retry = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in self?.reconnect() }
+        retry = Timer.scheduledTimer(withTimeInterval: retryDelay, repeats: false) { [weak self] _ in self?.reconnect() }
+        retryDelay = min(retryDelay * 2, 30)
     }
 
     private func teardown() {
@@ -576,6 +586,9 @@ final class App: NSObject, NSApplicationDelegate {
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
                      NSWorkspace.sessionDidResignActiveNotification] {
             workspace.addObserver(forName: name, object: nil, queue: .main, using: backToMac)
+        }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.link.retryNow() }
         }
     }
 
