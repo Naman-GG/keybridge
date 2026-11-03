@@ -2,7 +2,9 @@ package main
 
 import (
 	"log"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -93,9 +95,23 @@ func metric(i uintptr) int32 {
 }
 
 // Moves to an absolute position so Windows' pointer acceleration isn't applied on top of the Mac's.
+// GetCursorPos lags behind injected moves, so moves arriving in a burst would each start from a stale
+// position and lose distance. Moves that follow closely start from where the previous one was sent.
+var lastMove struct {
+	sync.Mutex
+	x, y int32
+	at   time.Time
+}
+
 func moveMouse(dx, dy int32) {
+	lastMove.Lock()
+	defer lastMove.Unlock()
 	var pt struct{ x, y int32 }
-	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	if time.Since(lastMove.at) < 100*time.Millisecond {
+		pt.x, pt.y = lastMove.x, lastMove.y
+	} else {
+		procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	}
 	vx, vy := metric(smXVirtualScreen), metric(smYVirtualScreen)
 	vw, vh := metric(smCXVirtualScreen), metric(smCYVirtualScreen)
 	if vw <= 0 || vh <= 0 {
@@ -103,6 +119,7 @@ func moveMouse(dx, dy int32) {
 	}
 	x := min(max(pt.x+dx, vx), vx+vw-1) - vx
 	y := min(max(pt.y+dy, vy), vy+vh-1) - vy
+	lastMove.x, lastMove.y, lastMove.at = x+vx, y+vy, time.Now()
 	sendMouse(mouseInput{
 		dx:      int32((int64(x)*65536 + 32768) / int64(vw)),
 		dy:      int32((int64(y)*65536 + 32768) / int64(vh)),
