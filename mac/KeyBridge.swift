@@ -303,6 +303,7 @@ final class App: NSObject, NSApplicationDelegate {
     var tap: CFMachPort?
     var mouseTap: CFMachPort?
     var tapRetry: Timer?
+    var tapReenable: Timer?
     var parkPoint = CGPoint.zero
     var moveRest = CGPoint.zero
     var scrollRest = CGPoint.zero
@@ -386,9 +387,19 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            if let mouseTap { CGEvent.tapEnable(tap: mouseTap, enable: remote) }
+        if type == .tapDisabledByTimeout {
+            enableTaps()
+            return Unmanaged.passUnretained(event)
+        }
+        // macOS disables taps while a password field has focus (including the lock screen). Re-enabling
+        // straight away gets them disabled again in a tight loop that stalls WindowServer, so retry each second.
+        if type == .tapDisabledByUserInput {
+            if tapReenable == nil {
+                tapReenable = Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { [weak self] _ in
+                    self?.tapReenable = nil
+                    self?.enableTaps()
+                }
+            }
             return Unmanaged.passUnretained(event)
         }
         if type == .scrollWheel || moveTypes.contains(type) || buttonTypes[type] != nil || [gestureEvent, dockGestureEvent].contains(type.rawValue) {
@@ -443,6 +454,11 @@ final class App: NSObject, NSApplicationDelegate {
         guard remote else { return }
         if down { flushPendingRightCmd() }
         send(pcScan(mod), down: down)
+    }
+
+    func enableTaps() {
+        if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+        if let mouseTap { CGEvent.tapEnable(tap: mouseTap, enable: remote) }
     }
 
     func handleMouse(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
